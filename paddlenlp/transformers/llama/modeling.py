@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+import os
 import warnings
 from functools import partial
 from typing import Optional, Tuple
@@ -44,12 +45,23 @@ except ImportError:
         return F.silu(x) * y
 
 
+try:
+    from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+        ColumnSequenceParallelLinear,
+        GatherOp,
+        RowSequenceParallelLinear,
+        ScatterOp,
+        mark_as_sequence_parallel_parameter,
+    )
+except:
+    pass
 from paddle.utils import try_import
 
 from paddlenlp.transformers.conversion_utils import (
     StateDictNameMapping,
     init_name_mappings,
 )
+from paddlenlp.transformers.long_sequence_strategies import LongSequenceStrategies
 from paddlenlp.transformers.model_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
     CausalLMOutputWithCrossAttentions,
@@ -59,13 +71,6 @@ from paddlenlp.utils.log import logger
 from paddlenlp.utils.tools import get_env_device
 
 from ..segment_parallel_utils import ReshardLayer
-from ..sequence_parallel_utils import (
-    ColumnSequenceParallelLinear,
-    GatherOp,
-    RowSequenceParallelLinear,
-    ScatterOp,
-    mark_as_sequence_parallel_parameter,
-)
 from .configuration import (
     LLAMA_PRETRAINED_INIT_CONFIGURATION,
     LLAMA_PRETRAINED_RESOURCE_FILES_MAP,
@@ -74,8 +79,6 @@ from .configuration import (
 
 try:
     if get_env_device() == "npu":
-        import os
-
         from paddle.base import core
 
         for lib in os.listdir(os.getenv("CUSTOM_DEVICE_ROOT")):
@@ -91,6 +94,13 @@ __all__ = [
     "LlamaForCausalLM",
     "LlamaPretrainingCriterion",
 ]
+
+
+def is_mc2_valid():
+    current_device = get_env_device()
+    if current_device == "npu":
+        return True
+    return False
 
 
 def _get_interleave(n):
@@ -238,6 +248,7 @@ def scaled_dot_product_attention(
                     0.0,
                     attention_mask is None,
                     True,
+                    False,
                     False,
                 )[0]
             else:
@@ -563,8 +574,17 @@ class LlamaMLP(nn.Layer):
         self.fuse_attention_ffn = config.fuse_attention_ffn
 
         if config.sequence_parallel:
-            ColumnParallelLinear = ColumnSequenceParallelLinear
-            RowParallelLinear = RowSequenceParallelLinear
+            if is_mc2_valid and int(os.getenv("FLAGS_NPU_MC2", 0)):
+                from paddlenlp.transformers.mc2_seqence_parallel_linear import (
+                    MC2ColumnSeqParallelLinear,
+                    MC2RowSeqParallelLinear,
+                )
+
+                ColumnParallelLinear = MC2ColumnSeqParallelLinear
+                RowParallelLinear = MC2RowSeqParallelLinear
+            else:
+                ColumnParallelLinear = ColumnSequenceParallelLinear
+                RowParallelLinear = RowSequenceParallelLinear
         else:
             ColumnParallelLinear = fleet.meta_parallel.ColumnParallelLinear
             RowParallelLinear = fleet.meta_parallel.RowParallelLinear
@@ -668,7 +688,7 @@ class LlamaAttention(nn.Layer):
                 )
 
         self.use_fused_rope = config.use_fused_rope
-        if self.use_fused_rope:
+        if self.use_fused_rope and get_env_device() != "npu":
             if "gpu" not in paddle.device.get_device() or fused_rotary_position_embedding is None:
                 warnings.warn(
                     "Enable fuse rope in the config, but fuse rope is not available. "
@@ -677,8 +697,17 @@ class LlamaAttention(nn.Layer):
                 self.use_fused_rope = False
 
         if config.sequence_parallel:
-            ColumnParallelLinear = ColumnSequenceParallelLinear
-            RowParallelLinear = RowSequenceParallelLinear
+            if is_mc2_valid and int(os.getenv("FLAGS_NPU_MC2", 0)):
+                from paddlenlp.transformers.mc2_seqence_parallel_linear import (
+                    MC2ColumnSeqParallelLinear,
+                    MC2RowSeqParallelLinear,
+                )
+
+                ColumnParallelLinear = MC2ColumnSeqParallelLinear
+                RowParallelLinear = MC2RowSeqParallelLinear
+            else:
+                ColumnParallelLinear = ColumnSequenceParallelLinear
+                RowParallelLinear = RowSequenceParallelLinear
         else:
             ColumnParallelLinear = fleet.meta_parallel.ColumnParallelLinear
             RowParallelLinear = fleet.meta_parallel.RowParallelLinear
@@ -762,7 +791,14 @@ class LlamaAttention(nn.Layer):
             )
 
         if config.rope:
-            self._init_rope()
+            if config.use_long_sequence_strategies:
+                self.rotary_emb = LongSequenceStrategies.build_long_sequence_strategy(
+                    config.long_sequence_strategy_type,
+                    config.long_sequence_strategy_name,
+                    **config.long_sequence_init_args,
+                )
+            else:
+                self._init_rope()
 
         self.reshard_layer = None
         if config.sep_parallel_degree > 1:
@@ -971,7 +1007,17 @@ class LlamaAttention(nn.Layer):
                             use_neox_rotary_style=False,
                         )
             else:
-                cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+                if self.config.use_long_sequence_strategies:
+                    cos, sin = self.rotary_emb(seq_len=kv_seq_len)
+                    cos = cos[None, :, None, :]
+                    sin = sin[None, :, None, :]
+                    cos, sin = (
+                        cos.cast(value_states.dtype) if cos.dtype != value_states.dtype else cos,
+                        sin.cast(value_states.dtype) if sin.dtype != value_states.dtype else sin,
+                    )
+                else:
+                    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         # [bs, seq_len, num_head, head_dim]
@@ -1325,6 +1371,7 @@ class LlamaModel(LlamaPretrainedModel):
         self.recompute_granularity = config.recompute_granularity
         # print("config.no_recompute_layers",config.no_recompute_layers) None
         self.no_recompute_layers = config.no_recompute_layers if config.no_recompute_layers is not None else []
+        self.config = config
 
         # Recompute defaults to False and is controlled by Trainer
         self.enable_recompute = False
@@ -1464,7 +1511,7 @@ class LlamaModel(LlamaPretrainedModel):
         seq_length_with_past = seq_length
         cache_length = 0
         if past_key_values[0] is not None:
-            cache_length = paddle.shape(past_key_values[0][0])[1]
+            cache_length = past_key_values[0][0].shape[1]
             seq_length_with_past += cache_length
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -1481,7 +1528,15 @@ class LlamaModel(LlamaPretrainedModel):
             # [bs, seq_len]
             attention_mask = paddle.ones((batch_size, seq_length_with_past), dtype=paddle.bool)
         if self.config.alibi:
-            alibi = build_alibi_tensor(attention_mask, self.config.num_attention_heads, dtype=inputs_embeds.dtype)
+            if self.config.use_long_sequence_strategies:
+                alibi_layer = LongSequenceStrategies.build_long_sequence_strategy(
+                    self.config.long_sequence_strategy_type,
+                    self.config.long_sequence_strategy_name,
+                    **self.config.long_sequence_init_args,
+                )
+                alibi = alibi_layer(attention_mask, self.config.num_attention_heads, dtype=inputs_embeds.dtype)
+            else:
+                alibi = build_alibi_tensor(attention_mask, self.config.num_attention_heads, dtype=inputs_embeds.dtype)
             if self.config.tensor_parallel_degree > 1:
                 block_size = self.config.num_attention_heads // self.config.tensor_parallel_degree
                 alibi = alibi[
@@ -1503,9 +1558,12 @@ class LlamaModel(LlamaPretrainedModel):
             attention_mask, (batch_size, seq_length), cache_length, inputs_embeds.dtype
         )  # [bs, 1, seq_len, seq_len]
         if self.config.use_flash_attention:
-            is_casual = is_casual_mask(attention_mask)
-            if is_casual and alibi is None:
-                attention_mask = None
+            if get_env_device() != "npu":
+                is_casual = is_casual_mask(attention_mask)
+                if is_casual and alibi is None:
+                    attention_mask = None
+            else:
+                attention_mask = attention_mask.astype("bool")
         hidden_states = inputs_embeds
 
         # decoder layers

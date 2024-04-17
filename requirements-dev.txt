@@ -1,4 +1,3 @@
-paddlepaddle==2.5.1
 paddleocr<2.7
 pre-commit
 pytest
@@ -28,3 +27,4 @@ ray
 loguru
 data
 wget
+huggingface_hub>=0.19.2

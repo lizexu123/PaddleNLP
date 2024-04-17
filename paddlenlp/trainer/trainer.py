@@ -39,10 +39,9 @@ import paddle.amp.auto_cast as autocast
 import paddle.distributed as dist
 import paddle.nn as nn
 from packaging import version
+from paddle import framework
+from paddle.base import core
 from paddle.distributed import fleet
-from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer.dygraph_sharding_optimizer import (
-    DygraphShardingOptimizer,
-)
 from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer.hybrid_parallel_optimizer import (
     HybridParallelOptimizer,
 )
@@ -416,9 +415,9 @@ class Trainer:
             self.scaler = paddle.amp.GradScaler(init_loss_scaling=self.args.scale_loss)
             if self.amp_dtype == "float16" or self.amp_dtype == "bfloat16":
                 if ShardingOption.SHARD_OP in self.args.sharding:
-                    self.scaler = fleet.distributed_scaler(self.scaler)
                     if self.args.amp_master_grad:
                         mix_precision_utils.MixPrecisionScaler(self.scaler)  # retun value has no use
+                    self.scaler = fleet.distributed_scaler(self.scaler)
                 else:
                     # scaler for stage2 and stage3
                     from paddle.distributed.fleet.meta_parallel.sharding.group_sharded_utils import (
@@ -921,6 +920,7 @@ class Trainer:
                         steps_trained_progress_bar.update(1)
                     if steps_trained_in_current_epoch == 0:
                         self._load_rng_state(resume_from_checkpoint)
+                    self.timers and self.timers("read-data").start()
                     continue
                 elif steps_trained_progress_bar is not None:
                     steps_trained_progress_bar.close()
@@ -1258,6 +1258,20 @@ class Trainer:
             logs["learning_rate"] = float("{0:.3e}".format(self._get_learning_rate()))
             logs["global_step"] = int(self.state.global_step)
 
+            divisor = 2**30
+            # TODO(@gexiao): replace these codes with unified APIs in Paddle
+            current_device = framework._current_expected_place_()
+            if str(current_device) != "Place(cpu)":
+                device_id = current_device.get_device_id()
+                current_memory_allocated = core.device_memory_stat_current_value("Allocated", device_id)
+                current_memory_reserved = core.device_memory_stat_current_value("Reserved", device_id)
+                max_memory_allocated = core.device_memory_stat_peak_value("Allocated", device_id)
+                max_memory_reserved = core.device_memory_stat_peak_value("Reserved", device_id)
+                logs["current_memory_allocated"] = current_memory_allocated / divisor
+                logs["current_memory_reserved"] = current_memory_reserved / divisor
+                logs["max_memory_allocated"] = max_memory_allocated / divisor
+                logs["max_memory_reserved"] = max_memory_reserved / divisor
+
             total_train_batch_size = (
                 self.args.train_batch_size * self.args.gradient_accumulation_steps * self.args.dataset_world_size
             )
@@ -1537,38 +1551,14 @@ class Trainer:
             if hasattr(optimizer_cls, "_create_master_weight") and self.args.fp16_opt_level == "O2":
                 optimizer_kwargs["multi_precision"] = True
 
-            def is_new_version_sharding_stage1_optimizer():
-                signature_keys = set(inspect.signature(DygraphShardingOptimizer).parameters.keys())
-                return "inner_optimizer_class" not in signature_keys
-
-            if ShardingOption.SHARD_OP in self.args.sharding and not is_new_version_sharding_stage1_optimizer():
-                # for backward compatibility.
-                # this call will raise, if sharding stage1 is supported in HybridParallelOptimizer,
-                # in which case, the logic follows will handle it
-                self.optimizer = DygraphShardingOptimizer(
-                    hcg=fleet.get_hybrid_communicate_group(),
-                    user_defined_strategy=None,
-                    params=params,
-                    inner_optimizer_class=optimizer_cls,
-                    learning_rate=self.lr_scheduler if lr_scheduler is None else lr_scheduler,
-                    apply_decay_param_fun=apply_decay_param_fun,
-                    weight_decay=self.args.weight_decay,
-                    grad_clip=nn.ClipGradByGlobalNorm(self.args.max_grad_norm)
-                    if self.args.max_grad_norm > 0
-                    else None,
-                    **optimizer_kwargs,
-                )
-            else:
-                self.optimizer = optimizer_cls(
-                    learning_rate=self.lr_scheduler if lr_scheduler is None else lr_scheduler,
-                    apply_decay_param_fun=apply_decay_param_fun,
-                    parameters=params,
-                    weight_decay=self.args.weight_decay,
-                    grad_clip=nn.ClipGradByGlobalNorm(self.args.max_grad_norm)
-                    if self.args.max_grad_norm > 0
-                    else None,
-                    **optimizer_kwargs,
-                )
+            self.optimizer = optimizer_cls(
+                learning_rate=self.lr_scheduler if lr_scheduler is None else lr_scheduler,
+                apply_decay_param_fun=apply_decay_param_fun,
+                parameters=params,
+                weight_decay=self.args.weight_decay,
+                grad_clip=nn.ClipGradByGlobalNorm(self.args.max_grad_norm) if self.args.max_grad_norm > 0 else None,
+                **optimizer_kwargs,
+            )
 
         return self.optimizer
 
@@ -1612,14 +1602,12 @@ class Trainer:
         random.setstate(checkpoint_rng_state["python"])
         np.random.set_state(checkpoint_rng_state["numpy"])
 
-        core = paddle.framework.core
-
-        core.default_cpu_generator().manual_seed(checkpoint_rng_state["cpu"])
+        core.default_cpu_generator().set_state(checkpoint_rng_state["cpu"])
         if core.is_compiled_with_cuda():
             if not len(checkpoint_rng_state["cuda"]) == core.get_cuda_device_count():
                 raise ValueError("Length of gpu state list shoule be equal to the gpu device count")
             for i in range(core.get_cuda_device_count()):
-                core.default_cuda_generator(i).manual_seed(checkpoint_rng_state["cuda"][i])
+                core.default_cuda_generator(i).set_state(checkpoint_rng_state["cuda"][i])
 
         if paddle.device.get_all_custom_device_type() is not None:
             custom_device_type = paddle.device.get_all_custom_device_type()
@@ -1627,7 +1615,7 @@ class Trainer:
                 if not len(checkpoint_rng_state["cuda"]) == core.get_custom_device_count(device):
                     raise ValueError("Length of custom device state list shoule be equal to the custom device count")
                 for i in range(core.get_custom_device_count(device)):
-                    core.default_custom_device_generator(paddle.CustomPlace(device, i)).manual_seed(
+                    core.default_custom_device_generator(paddle.CustomPlace(device, i)).set_state(
                         checkpoint_rng_state["cuda"][i]
                     )
 
@@ -1676,13 +1664,16 @@ class Trainer:
         warmup = (
             self.args.warmup_steps if self.args.warmup_steps > 0 else int(self.args.warmup_ratio * num_training_steps)
         )
+        decay_steps = num_training_steps
+        if hasattr(self.args, "decay_steps") and self.args.decay_steps > 0:
+            decay_steps = self.args.decay_steps
 
         if self.lr_scheduler is None:
             self.lr_scheduler = get_scheduler(
                 self.args.lr_scheduler_type,
                 learning_rate=self.args.learning_rate,
                 num_warmup_steps=warmup,
-                num_training_steps=num_training_steps,
+                num_training_steps=decay_steps,
                 num_cycles=self.args.num_cycles,
                 lr_end=self.args.lr_end,
                 power=self.args.power,
@@ -2118,6 +2109,11 @@ class Trainer:
             # recover unified_checkpoint_config for not trine stage
             if not self.is_in_train:
                 self.args.unified_checkpoint_config = unified_checkpoint_config_backup
+        if strtobool(os.getenv("FLAG_LLM_PDC", "False")):
+            # save checkpoint_done file to ensure checkpoint is complete
+            if self.args.should_save_model_state and self.args.should_save:
+                # For ckpt integrity
+                paddle.save(self.state.global_step, os.path.join(output_dir, ".checkpoint_done"))
 
     def _save_checkpoint(self, model, metrics=None):
         # assert unwrap_model(model) is self.model, "internal model should be a reference to self.model"
@@ -2203,8 +2199,8 @@ class Trainer:
         rng_states = {
             "python": random.getstate(),
             "numpy": np.random.get_state(),
-            "cuda": [k.current_seed() for k in paddle.get_rng_state()],
-            "cpu": paddle.framework.core.default_cpu_generator().get_state().current_seed(),
+            "cuda": paddle.get_rng_state(),
+            "cpu": paddle.framework.core.default_cpu_generator().get_state(),
         }
         if self.args.use_hybrid_parallel:
             rng_states[
@@ -2305,7 +2301,8 @@ class Trainer:
         checkpoints_to_be_deleted = checkpoints_sorted[:number_of_checkpoints_to_delete]
         for checkpoint in checkpoints_to_be_deleted:
             logger.info(f"Deleting older checkpoint [{checkpoint}] due to args.save_total_limit")
-            shutil.rmtree(checkpoint)
+            # ignore_errors for shared disks between train nodes.
+            shutil.rmtree(checkpoint, ignore_errors=True)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None, merge_tensor_parallel=False):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
@@ -2456,6 +2453,7 @@ class Trainer:
             # Load in optimizer and scheduler states
             self.optimizer.set_state_dict(opt_state_dict)
         else:
+            optimizer_name = _add_variant(OPTIMIZER_NAME, self.args.optimizer_name_suffix)
             raise ValueError(f"optimizer-state-dict not found, opt: {os.path.join(checkpoint, optimizer_name)}.")
 
         if not self.args.ignore_load_lr_and_optim:
