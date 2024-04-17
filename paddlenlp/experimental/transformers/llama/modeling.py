@@ -109,9 +109,11 @@ class LlamaInferenceModel(LlamaPretrainedModel):
         self.use_weight_only = False
         self.weight_only_quant_bits = config.weight_only_quant_bits
 
+        print("self.quant_type", self.quant_type)
         if self.quant_type is not None and "weight_only_int" in self.quant_type:
             self.use_weight_only = True
         elif self.quant_type is not None and "a8w8" in self.quant_type:
+            print("self.quant_model_path", config.model_name_or_path)
             self.quant_model_path = config.model_name_or_path
             self.shift = config.quantization_config.shift
             self.smooth = config.quantization_config.smooth

@@ -172,6 +172,7 @@ class AutoConfig(PretrainedConfig):
 
         # From built-in pretrained models
         if pretrained_model_name_or_path in cls.name2class:
+            print("pretrainde_model_name_or_path in cls.name2class")
             return cls.name2class[pretrained_model_name_or_path].from_pretrained(
                 pretrained_model_name_or_path, *model_args, **kwargs
             )
@@ -182,6 +183,7 @@ class AutoConfig(PretrainedConfig):
         from_aistudio = kwargs.pop("from_aistudio", False)
         from_hf_hub = kwargs.pop("from_hf_hub", False)
         cache_dir = kwargs.pop("cache_dir", None)
+        print("cache_dir", cache_dir)
 
         config_file = resolve_file_path(
             pretrained_model_name_or_path,
@@ -191,6 +193,7 @@ class AutoConfig(PretrainedConfig):
             from_hf_hub=from_hf_hub,
             from_aistudio=from_aistudio,
         )
+        print("config_file", config_file)
         if config_file is not None and os.path.exists(config_file):
             config_class = cls._get_config_class_from_config(pretrained_model_name_or_path, config_file)
             logger.info("We are using %s to load '%s'." % (config_class, pretrained_model_name_or_path))

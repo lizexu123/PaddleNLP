@@ -1323,10 +1323,12 @@ class LlamaModel(LlamaPretrainedModel):
         self.hidden_size = config.hidden_size
         self.sequence_parallel = config.sequence_parallel
         self.recompute_granularity = config.recompute_granularity
+        # print("config.no_recompute_layers",config.no_recompute_layers) None
         self.no_recompute_layers = config.no_recompute_layers if config.no_recompute_layers is not None else []
 
         # Recompute defaults to False and is controlled by Trainer
         self.enable_recompute = False
+        print("config.tensor_parallel_degree", config.tensor_parallel_degree)
         if config.tensor_parallel_degree > 1 and config.vocab_size % config.tensor_parallel_degree == 0:
             self.embed_tokens = mpu.VocabParallelEmbedding(
                 self.vocab_size,
@@ -1334,11 +1336,14 @@ class LlamaModel(LlamaPretrainedModel):
                 weight_attr=paddle.ParamAttr(initializer=nn.initializer.XavierNormal()),
             )
         else:
+            print("self.vocab_size", self.vocab_size)
+            print("self.hidden_size", self.hidden_size)
             self.embed_tokens = nn.Embedding(
                 self.vocab_size,
                 self.hidden_size,
             )
 
+        print("config.num_hidden_layers", config.num_hidden_layers)
         self.layers = nn.LayerList(
             [LlamaDecoderLayer(config, i not in self.no_recompute_layers) for i in range(config.num_hidden_layers)]
         )
@@ -1674,6 +1679,7 @@ class LlamaForCausalLM(LlamaPretrainedModel):
         super().__init__(config)
         self.config = config
 
+        print("LlamaForCausalLM的config", config)
         self.llama = LlamaModel(config)
         self.lm_head = LlamaLMHead(config)
         self.criterion = LlamaPretrainingCriterion(config)

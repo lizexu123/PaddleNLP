@@ -261,6 +261,7 @@ class _BaseAutoModelClass:
 
     @classmethod
     def _from_pretrained(cls, pretrained_model_name_or_path, task=None, *model_args, **kwargs):
+        # print("task",task) None
         if task:
             if cls._task_choice:
                 cls._name_mapping = get_name_mapping(task)
@@ -274,13 +275,20 @@ class _BaseAutoModelClass:
             subfolder = ""
         kwargs["cache_dir"] = cache_dir
         kwargs["subfolder"] = subfolder
+        print("cache_dir", cache_dir)
         all_model_names = []
         for pretrained_model_names, model_name in cls._pretrained_model_dict.items():
             for name in pretrained_model_names:
                 all_model_names.append(name)
 
+        print("pretrained_model_name_or_path", pretrained_model_name_or_path)
         # From built-in pretrained models
         if pretrained_model_name_or_path in all_model_names:
+            print("条件为真")
+        else:
+            print("条件为假")
+        if pretrained_model_name_or_path in all_model_names:
+            print("pretrained_model_name_or_path 在all_model_names中")
             for pretrained_model_names, model_name in cls._pretrained_model_dict.items():
                 # From built-in pretrained models
                 for pattern in pretrained_model_names:
@@ -319,6 +327,7 @@ class _BaseAutoModelClass:
             from_hf_hub=from_hf_hub,
             from_aistudio=from_aistudio,
         )
+        print("modeling.py中config_file", config_file)
         if config_file is not None and os.path.exists(config_file):
             model_class = cls._get_model_class_from_config(pretrained_model_name_or_path, config_file)
             logger.info(f"We are using {model_class} to load '{pretrained_model_name_or_path}'.")

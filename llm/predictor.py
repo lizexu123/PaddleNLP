@@ -49,8 +49,8 @@ from paddlenlp.transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
-    ChatGLMv2Tokenizer,
     ChatGLMTokenizer,
+    ChatGLMv2Tokenizer,
     LlamaTokenizer,
     PretrainedModel,
     PretrainedTokenizer,
@@ -242,7 +242,8 @@ class BasePredictor:
             padding=True,
             # when use chat_template, it should not add special tokens
             # chatglm2 prefix-tokens can not be tokenized into ids
-            add_special_tokens=self.tokenizer.chat_template is None or isinstance(self.tokenizer, (ChatGLMv2Tokenizer, ChatGLMTokenizer)),
+            add_special_tokens=self.tokenizer.chat_template is None
+            or isinstance(self.tokenizer, (ChatGLMv2Tokenizer, ChatGLMTokenizer)),
         )
         return tokenized_source
 
@@ -269,6 +270,9 @@ class DygraphPredictor(BasePredictor):
     ):
         super().__init__(config, tokenizer)
         self.model = model
+        print("config.lora_path", config.lora_path)
+        print("config.prefix_path", config.prefix_path)
+        print("config.dtype", config.dtype)
         if config.lora_path is not None:
             lora_config = LoRAConfig.from_pretrained(config.lora_path)
             dtype = lora_config.dtype
@@ -1184,16 +1188,25 @@ def create_predictor(
     tokenizer = AutoTokenizer.from_pretrained(
         predictor_args.model_name_or_path,
     )
+    print("predictor_args.model_name_or_path", predictor_args.model_name_or_path)
     # init chat_template for tokenizer
     init_chat_template(tokenizer, predictor_args.model_name_or_path, predictor_args.chat_template)
 
     # TODO(wj-Mcat): fix llama tokenzier pad_token bug
+    print("tokenizer", tokenizer)
+    print("tokenizer.pad_token", tokenizer.pad_token)
+    condition_result = isinstance(tokenizer, LlamaTokenizer)
+    print("condition_result", condition_result)
     if isinstance(tokenizer, LlamaTokenizer) and not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.unk_token
+        print("tokenizer.pad_token", tokenizer.pad_token)
 
     config = AutoConfig.from_pretrained(predictor_args.model_name_or_path)
+    print("config是什么", config)
 
     max_position_embeddings = get_model_max_position_embeddings(config)
+    print("max_position_embeddings", max_position_embeddings)
+
     if max_position_embeddings is None:
         max_position_embeddings = 2048
         logger.warning("Can not retrieval `max_position_embeddings` from config.json, use default value 2048")
@@ -1202,6 +1215,8 @@ def create_predictor(
         if predictor_args.max_length is None:
             predictor_args.src_length = get_default_max_encoding_length(config)
             predictor_args.max_length = get_default_max_decoding_length(config)
+            print("predictor_args.src_length", predictor_args.src_length)
+            print("predictor_args.max_length", predictor_args.max_length)
         else:
             predictor_args.src_length = max_position_embeddings - predictor_args.max_length
             if predictor_args.src_length <= 0:
@@ -1226,13 +1241,17 @@ def create_predictor(
                 )
 
     # update config parameter for inference predictor
+    print("predictor_args.decode_strategy", predictor_args.decode_strategy)
     if predictor_args.decode_strategy == "greedy_search":
         predictor_args.top_p = 0.0
         predictor_args.temperature = 1.0
 
     tensor_parallel_rank, tensor_parallel_degree = init_dist_env()
+    print("predictor_args.inference_model", predictor_args.inference_model)
     if not predictor_args.inference_model:
         tokenizer.padding_side = "left"
+        print("predictor_args.mode", predictor_args.mode)
+        print("model_args.model_type", model_args.model_type)
         if predictor_args.mode == "dynamic":
             if model_args.model_type == "gpt-3":
                 sys.path.append("./gpt-3")
@@ -1264,8 +1283,11 @@ def create_predictor(
                     tensor_parallel_degree=tensor_parallel_degree,
                     tensor_parallel_rank=tensor_parallel_rank,
                 )
+                # 创建的创建一个 AutoModelForCausalLM 的实例。通过指定内置预训练模型的名称、社区贡献的模型名称或本地文件目录路径来加载模型权重。
+                print("model的类型", type(model))
 
             predictor = DygraphPredictor(predictor_args, model=model, tokenizer=tokenizer)
+            print("predictor是什么东西", predictor)
         elif predictor_args.mode == "static":
             predictor = StaticGraphPredictor(predictor_args, tokenizer=tokenizer)
         else:

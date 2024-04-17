@@ -705,6 +705,8 @@ class PretrainedConfig:
 
         # Get config dict associated with the base config file
         config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+        print("config_dict", config_dict)
+        print("kwargs", kwargs)
 
         # That config file may point us toward another config file to use.
         if "configuration_files" in config_dict:

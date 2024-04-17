@@ -728,6 +728,7 @@ class GenerationMixin(object):
                 print(response)
                 # ['是的', '嗯嗯']
         """
+        print("generation_config", generation_config)
         if generation_config is None:
             if self.generation_config._from_model_config:
                 new_generation_config = GenerationConfig.from_model_config(self.config)
@@ -792,6 +793,11 @@ class GenerationMixin(object):
             if generation_config.no_repeat_ngram_size is not None
             else self.config.no_repeat_ngram_size
         )
+
+        if hasattr(self, "_fast_entry"):
+            print("对象具有 _fast_entry 属性")
+        else:
+            print("对象不具有 _fast_entry 属性")
 
         if getattr(self, "_fast_entry", None) is not False and use_fast:
             fg_args = locals()

@@ -2081,7 +2081,7 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
         if convert_from_torch is None:
             convert_from_torch = False
 
-        # 1. get the PretrainedConfig to init model
+        # 1. get the PretrainedConfig to init model 检查config是否是PretrainedConfig的一个实例
         if not isinstance(config, PretrainedConfig):
             config_path = config if config is not None else pretrained_model_name_or_path
             config, model_kwargs = cls.config_class.from_pretrained(
@@ -2093,6 +2093,9 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                 return_unused_kwargs=True,
                 **kwargs,
             )
+            print("cls.config_class", cls.config_class)
+            print("PretrainedConfig中的config", config)
+        # 如果model_kwargs中包含from_aistudio,则删除
         if "from_aistudio" in model_kwargs:
             model_kwargs.pop("from_aistudio")
 
@@ -2100,11 +2103,16 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
         #     if not os.path.exists(os.path.join(cache_dir, pretrained_model_name_or_path, subfolder, CONFIG_NAME)):
         #         config.save_pretrained(os.path.join(cache_dir, pretrained_model_name_or_path, subfolder))
 
-        # refine options for config
+        # refine options for config false
         convert_from_torch = cls.support_conversion(config) and convert_from_torch
+
+        # print("dtype长什么样啊",dtype) float16
         if dtype is None:
+            print("config.dtype", config.dtype)
             dtype = config.dtype
 
+        # 是否对模型权重量化,检查模型配置中是否启用了权重量化,is_weight_quantize()返回一个布尔值。
+        # print("config.quantization_config.is_weight_quantize()",config.quantization_config.is_weight_quantize()) 因为我给的float16,所以为false
         if config.quantization_config.is_weight_quantize():
             try:
                 from ..quantization.quantization_utils import (
@@ -2120,7 +2128,10 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                 )
         config.dtype = dtype
 
+        # 用来收集初始化期间将被使用的上下文管理器的列表
         init_contexts = []
+        #
+        print("low_cpu_mem_usage", low_cpu_mem_usage)
         if low_cpu_mem_usage or config.quantization_config.is_weight_quantize():
             # Instantiate model.
             init_contexts.append(no_init_weights(_enable=True))
@@ -2128,6 +2139,7 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                 init_contexts.append(paddle.LazyGuard())
 
         if dtype:
+            # print("dtype_guard(dtype)",dtype_guard(dtype))contextlib._GeneratorContextManager object at 0x7fdf37d44310>
             init_contexts.append(dtype_guard(dtype))
 
         # Quantization method requires empty init to avoid unnecessary GPU allocation
@@ -2141,7 +2153,7 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
         keep_in_fp32_modules = None
         use_keep_in_fp32_modules = False
 
-        # resolve model_weight file
+        # resolve model_weight file 这个方法最终返回模型权重文件的路径,或者是包含所有分片文件的列表(如果模型权重被分片了),以及分片元数据和一个标志指示模型是否被分片。
         resolved_archive_file, resolved_sharded_files, sharded_metadata, is_sharded = cls._resolve_model_file_path(
             pretrained_model_name_or_path,
             cache_dir=cache_dir,
@@ -2153,6 +2165,8 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
             use_safetensors=use_safetensors,
             variant=variant,
         )
+        print("resolved_archive_file", resolved_archive_file)
+        print("is_shared", is_sharded)
 
         if convert_from_torch and state_dict is None:
             if (
@@ -2183,6 +2197,7 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                 raise ValueError(f"Unexpected file: {resolved_archive_file} for weight conversion.")
             # load pt weights early so that we know which dtype to init the model under
 
+        # print("state_dict",state_dict)
         if not is_sharded and state_dict is None:
             # 4. loading non-sharded ckpt from the state dict
             if config.tensor_parallel_degree > 1 and resolved_archive_file.endswith("model_state.pdparams"):
@@ -2193,11 +2208,14 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                 tp_actions = cls.get_tensor_parallel_convert_actions(config, loaded_keys)
                 state_dict = load_state_dict(resolved_archive_file, tp_actions)
             else:
+                print("resolved_archive_file", resolved_archive_file)
                 state_dict = load_state_dict(resolved_archive_file)
+                # Loading weights file from cache at /root/.paddlenlp/models/meta-llama/Llama-2-7b-chat/model_state.pdparams
 
             logger.info("Loaded weights file from disk, setting weights to model.")
 
         # Check if `_keep_in_fp32_modules` is not None
+        print("cls._keep_in_fp32_modules", cls._keep_in_fp32_modules)
         use_keep_in_fp32_modules = (cls._keep_in_fp32_modules is not None) and (
             dtype == "float16" or dtype == "bfloat16"
         )
@@ -2211,8 +2229,10 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
             state_dict = None
 
         # will only support load paddle.Tensor to model.
+        # print("state_dict",state_dict) #state_dict是一个包含模型参数的字典。
         if state_dict is not None:
             for k in list(state_dict.keys()):
+                # 检查state_dict的参数值是否为paddle.Tensor类型
                 if not isinstance(state_dict[k], paddle.Tensor):
                     with device_guard():
                         state_dict[k] = paddle.Tensor(state_dict.pop(k), zero_copy=True)
@@ -2220,6 +2240,7 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
         init_args = config["init_args"] or ()
         with ContextManagers(init_contexts):
             model = cls(config, *init_args, **model_kwargs)
+            print("model", model)
 
         if use_keep_in_fp32_modules:
             # low_cpu_mem_usage = True
@@ -2235,6 +2256,7 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                     quantization_config=config.quantization_config,
                     llm_int8_threshold=config.quantization_config.llm_int8_threshold,
                 )
+                # print("quantization_linear_list",quantization_linear_list)
                 quantization_linear_list = []
                 for key in model.state_dict().keys():
                     if "quant_weight" in key:

@@ -125,6 +125,7 @@ def resolve_file_path(
         local_files_only=local_files_only,
         endpoint=endpoint,
     )
+    print("download_kwargs", download_kwargs)
     cached_file = None
     log_endpoint = "N/A"
     # log_filename = os.path.join(download_kwargs["subfolder"], filename)
@@ -146,6 +147,7 @@ def resolve_file_path(
 
     # check cache
     for filename in filenames:
+        print("filename", filename)
         cache_file_name = bos_aistudio_hf_try_to_load_from_cache(
             repo_id, filename, cache_dir, subfolder, revision, repo_type, from_bos, from_aistudio, from_hf_hub
         )
@@ -155,12 +157,14 @@ def resolve_file_path(
             return cache_file_name
 
     from_modelscope = strtobool(os.environ.get("from_modelscope", False))
-
+    print("from_modelscope", from_modelscope)
     # download file from different origins
     try:
         if filenames[0].startswith("http://") or filenames[0].startswith("https://"):
             log_endpoint = "BOS"
             download_kwargs["url"] = filenames[0]
+            # 打印URL
+            print("Downloading from URL:", download_kwargs["url"])
             download_kwargs["repo_id"] = repo_id
             if filenames[0].split("/")[-1].endswith("pdparams"):
                 download_kwargs["filename"] = "model_state.pdparams"
@@ -233,6 +237,7 @@ def resolve_file_path(
         else:
             log_endpoint = "BOS"
             download_kwargs["url"] = url
+            print("下载config_file的url", url)
             for filename in filenames:
                 download_kwargs["filename"] = filename
                 is_available = bos_aistudio_hf_file_exist(
@@ -247,6 +252,7 @@ def resolve_file_path(
                     from_aistudio=from_aistudio,
                     from_hf_hub=from_hf_hub,
                 )
+                print("is_available", is_available)
                 if is_available:
                     cached_file = bos_download(
                         **download_kwargs,
