@@ -278,6 +278,8 @@ class FusedMultiTransformerBase(Layer):
         self._ring_id = config.ring_id
         self.nranks = config.nranks
         self.norm_type = config.norm_type
+
+        # print("self.norm_type", self.norm_type)
         if self.norm_type == "layernorm":
             self.norm_func = fused_layer_norm
         elif self.norm_type == "rmsnorm":
@@ -1022,6 +1024,37 @@ class FusedMultiTransformerWeightOnlyPostLayernorm(
         super().__init__(config)
 
 
+class QuantScaleOp(Layer):
+    def __init__(self, num_layers, num_heads, head_dim, dtype="float32", config=None):
+        super(QuantScaleOp, self).__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.num_layers = num_layers
+        self.config = config
+        self.qkv_out_scales = self.init_qkv_out_scales()
+
+    def init_qkv_out_scales(self):
+        qkv_out_scales = []
+        for i in range(self.num_layers):
+            qkv_out_scale_attr = self.config.qkv_out_scale_attrs[i]
+            qkv_out_scale = self.create_parameter(
+                shape=[self.head_dim * 3 * self.num_heads],
+                attr=qkv_out_scale_attr,
+                dtype="float32",
+                is_bias=False,
+                default_initializer=paddle.nn.initializer.Constant(0),
+            )
+            qkv_out_scales.append(qkv_out_scale)
+        return qkv_out_scales
+
+    def get_qkv_out_scale(self, layer_index):
+        if 0 <= layer_index < len(self.qkv_out_scales):
+            print("layer_index", layer_index)
+            return self.qkv_out_scales[layer_index]
+        else:
+            raise IndexError("Layer index out of range.")
+
+
 class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
     def __init__(self, config: FusedMultiTransformerConfig):
         super().__init__(config)
@@ -1047,9 +1080,18 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
         self.ffn1_out_scales = []
         self.ffn2_out_scales = []
 
+        # 实例化QuantScaleOp
+        # self.quant_scale_op = QuantScaleOp(num_layers=config.num_layers,
+        #                                    num_heads=config.num_heads,
+        #                                    head_dim=self.head_dim,
+        #                                    dtype=self._dtype,
+        #                                    config=config)
+        # print("self.quant_scale_op",self.quant_scale_op)
+
         self.linear_shifts, self.linear_smooths, self.ffn2_shifts, self.ffn2_smooths = [], [], [], []
 
         for i in range(self.num_layers):
+
             qkv_out_scale_attr = self.get_attr(config.qkv_out_scale_attrs, i)
             linear_out_scale_attr = self.get_attr(config.linear_out_scale_attrs, i)
             ffn1_out_scale_attr = self.get_attr(config.ffn1_out_scale_attrs, i)
@@ -1150,6 +1192,7 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
 
     def compute_layernorm_before_qkv(self, src, i):
         if i == 0:
+            # print("self.act_scales[qkv_in_scale]", self.act_scales["qkv_in_scale"][i])
             ln_out = self.norm_func(
                 src,
                 self.ln_scales[i],
@@ -1184,6 +1227,7 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
         attn_mask,
         i,
     ):
+
         qkv_out = dequant_int8(qkv_out, self.qkv_out_scales[i], self._dtype)
         if self.qkv_biases[i] is not None:
             qkv_out = paddle.add(qkv_out, self.qkv_biases[i])
@@ -1240,7 +1284,13 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
         return fmha_out
 
     def compute_mmha(self, qkv_out, caches, attn_mask, seq_lens, rotary_embs, rotary_emb_dims, i):
-        return masked_multihead_attention(
+        # qkv_out_scale = self.quant_scale_op.get_qkv_out_scale(i)
+        # print("qkv_out_scale", qkv_out_scale)
+
+        # qkv_out输入为int32,需要经过反量化将类型设置为float16
+        qkv_out = dequant_int8(qkv_out, self.qkv_out_scales[i], self._dtype)
+
+        (attention_out, cache_kv, beam_cache_offset) = masked_multihead_attention(
             x=qkv_out,
             bias=self.qkv_biases[i],
             cache_kv=caches[i],
@@ -1249,15 +1299,32 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
             rotary_tensor=rotary_embs,
             rotary_emb_dims=rotary_emb_dims,
             use_neox_rotary_style=self.use_neox_rotary_style,
-            qkv_out_scale=self.qkv_out_scales[i],
-            out_shift=self.linear_shifts[i] if len(self.linear_shifts) > 0 else None,
-            out_smooth=self.linear_smooths[i] if len(self.linear_smooths) > 0 else None,
-            out_scale=self.act_scales["out_linear_in_scale"][i],
+            qkv_out_scale=None,
+            out_shift=None,
+            out_smooth=None,
+            out_scale=-1.0,
             quant_round_type=self.quant_round_type,
             quant_max_bound=self.quant_max_bound,
             quant_min_bound=self.quant_min_bound,
             compute_dtype=self._fuse_kernel_compute_dtype,
-        )[0]
+        )
+
+        scale = self.act_scales["out_linear_in_scale"][i]
+        shift = self.linear_shifts[i] if len(self.linear_shifts) > 0 else None
+        smooth = self.linear_smooths[i] if len(self.linear_smooths) > 0 else None
+        round_type = self.quant_round_type
+        max_bound = self.quant_max_bound
+        min_bound = self.quant_min_bound
+
+        # 对输出进行量化
+        attention_out = quant_int8(attention_out, shift, smooth, scale, round_type, max_bound, min_bound)
+        # print("beam_cache_off",beam_cache_offset)
+        # if beam_cache_offset is not None:
+        #     return (attention_out, cache_kv, beam_cache_offset)
+        # else:
+        #     return (attention_out, cache_kv)
+        # print("attention_out",attention_out)git
+        return attention_out
 
     def compute_out_linear(self, fmha_out, i):
         out_linear_out = paddle.matmul(fmha_out, self.linear_weights[i], False, True)
@@ -1272,29 +1339,46 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
             bias=self.linear_biases[i],
             residual=residual_input,
             begin_norm_axis=1,
-            quant_scale=self.act_scales["ffn1_in_scale"][i],  # quant_in_scale
+            quant_scale=0,  # quant_in_scale
             quant_round_type=self.quant_round_type,
             quant_max_bound=self.quant_max_bound,
             quant_min_bound=self.quant_min_bound,
         )
         tmp_out, residual_input = norm_out[0], norm_out[1]
+        tmp_out = quant_int8(
+            tmp_out,
+            None,
+            None,
+            self.act_scales["ffn1_in_scale"][i],
+            self.quant_round_type,
+            self.quant_max_bound,
+            self.quant_min_bound,
+        )
 
         return tmp_out, residual_input
 
     def compute_activation(self, ffn1_out, i):
-        return fused_act_bias_wrapper(
+        ffn1_out = dequant_int8(ffn1_out, self.ffn1_out_scales[i], self._dtype)
+
+        out = fused_act_bias_wrapper(
             ffn1_out,
             self.ffn1_biases[i],
             act_method=self.activation,
             compute_dtype=self._fuse_kernel_compute_dtype,
-            dequant_scales=self.ffn1_out_scales[i],
-            shift=self.ffn2_shifts[i] if len(self.ffn2_shifts) > 0 else None,
-            smooth=self.ffn2_smooths[i] if len(self.ffn2_smooths) > 0 else None,
-            quant_scale=self.act_scales["ffn2_in_scale"][i],
+            dequant_scales=None,
+            shift=None,
+            smooth=None,
+            quant_scale=-1.0,
             quant_round_type=self.quant_round_type,
             quant_max_bound=self.quant_max_bound,
             quant_min_bound=self.quant_min_bound,
         )
+        shift = self.ffn2_shifts[i] if len(self.ffn2_shifts) > 0 else None
+        smooth = self.ffn2_smooths[i] if len(self.ffn2_smooths) > 0 else None
+        scale = self.act_scales["ffn2_in_scale"][i]
+
+        out = quant_int8(out, shift, smooth, scale, self.quant_round_type, self.quant_max_bound, self.quant_min_bound)
+        return out
 
     def compute_ffn1(self, tmp_out, i):
         return paddle.matmul(tmp_out, self.ffn1_weights[i], False, True)
@@ -1319,6 +1403,15 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
                 quant_min_bound=self.quant_min_bound,
             )
             tmp_out, residual_input = norm_out[0], norm_out[1]
+            tmp_out = quant_int8(
+                tmp_out,
+                None,
+                None,
+                self.act_scales["qkv_in_scale"][i + 1],
+                self.quant_round_type,
+                self.quant_max_bound,
+                self.quant_min_bound,
+            )
         else:
             tmp_out = fused_layer_norm(
                 ffn2_out,
