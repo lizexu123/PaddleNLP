@@ -1049,14 +1049,6 @@ class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
         self.ffn1_out_scales = []
         self.ffn2_out_scales = []
 
-        # 实例化QuantScaleOp
-        # self.quant_scale_op = QuantScaleOp(num_layers=config.num_layers,
-        #                                    num_heads=config.num_heads,
-        #                                    head_dim=self.head_dim,
-        #                                    dtype=self._dtype,
-        #                                    config=config)
-        # print("self.quant_scale_op",self.quant_scale_op)
-
         self.linear_shifts, self.linear_smooths, self.ffn2_shifts, self.ffn2_smooths = [], [], [], []
 
         for i in range(self.num_layers):
