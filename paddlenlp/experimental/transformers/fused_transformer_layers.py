@@ -1024,37 +1024,6 @@ class FusedMultiTransformerWeightOnlyPostLayernorm(
         super().__init__(config)
 
 
-class QuantScaleOp(Layer):
-    def __init__(self, num_layers, num_heads, head_dim, dtype="float32", config=None):
-        super(QuantScaleOp, self).__init__()
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.num_layers = num_layers
-        self.config = config
-        self.qkv_out_scales = self.init_qkv_out_scales()
-
-    def init_qkv_out_scales(self):
-        qkv_out_scales = []
-        for i in range(self.num_layers):
-            qkv_out_scale_attr = self.config.qkv_out_scale_attrs[i]
-            qkv_out_scale = self.create_parameter(
-                shape=[self.head_dim * 3 * self.num_heads],
-                attr=qkv_out_scale_attr,
-                dtype="float32",
-                is_bias=False,
-                default_initializer=paddle.nn.initializer.Constant(0),
-            )
-            qkv_out_scales.append(qkv_out_scale)
-        return qkv_out_scales
-
-    def get_qkv_out_scale(self, layer_index):
-        if 0 <= layer_index < len(self.qkv_out_scales):
-            print("layer_index", layer_index)
-            return self.qkv_out_scales[layer_index]
-        else:
-            raise IndexError("Layer index out of range.")
-
-
 class FusedMultiTransformerA8W8(FusedMultiTransformerBase):
     def __init__(self, config: FusedMultiTransformerConfig):
         super().__init__(config)
